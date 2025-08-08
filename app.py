@@ -18,7 +18,7 @@ CORS(app, origins=["http://localhost:3000"])  # Allow React dev server
 
 # Configuration
 app.config["DEBUG"] = os.getenv("DEBUG", "False").lower() == "true"
-app.config["MODEL_PATH"] = os.getenv("MODEL_PATH", "models/XGBoost_model.pkl")
+app.config["MODEL_PATH"] = os.getenv("MODEL_PATH", "models/CatBoost_model.pkl")
 
 
 @app.route("/")
@@ -115,7 +115,7 @@ def predict_calories():
             "success": True,
             "input": data,
             "predicted_calories": round(predicted_calories, 2),
-            "model": "XGBoost",
+            "model": "CatBoost",
             "message": f"Predicted {predicted_calories:.2f} calories burned",
         }
 
@@ -215,11 +215,11 @@ if __name__ == "__main__":
     model_dir.mkdir(exist_ok=True)
 
     # Check if model file exists
-    model_path = model_dir / "XGBoost_model.pkl"
+    model_path = model_dir / "CatBoost_model.pkl"
     if not model_path.exists():
         logger.error(f"Model file not found: {model_path}")
         logger.error(
-            "Please place your XGBoost_model.pkl file in the models/ directory"
+            "Please place your CatBoost_model.pkl file in the models/ directory"
         )
         exit(1)
 
