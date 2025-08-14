@@ -1,190 +1,157 @@
-import joblib
 import pandas as pd
 import numpy as np
+import joblib
 import logging
 from pathlib import Path
-import warnings
-import pickle
-from catboost import CatBoostRegressor
+from typing import Dict, Any, Optional
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 class CaloriePredictor:
-    def __init__(self, model_path="models/CatBoost_model.pkl"):
+    """Fixed Calorie Predictor using CatBoost model and preprocessor"""
+    
+    def __init__(self, model_path: str, preprocessor_path: str):
         self.model_path = Path(model_path)
+        self.preprocessor_path = Path(preprocessor_path)
         self.model = None
-        self.train_stats = None
-        self._initialize_stats()
-        self._load_model()
-
-    def _load_model(self):
-        """Load and prepare the model"""
-        if not self.model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {self.model_path}")
-
+        self.preprocessor = None
+        self.required_features = [
+            'Sex', 'Age', 'Height', 'Weight', 
+            'Duration', 'Heart_Rate', 'Body_Temp'
+        ]
+        # Training statistics for proper feature engineering
+        self.training_stats = None
+        self._load_components()
+    
+    def _load_components(self):
+        """Load model and preprocessor from pickle files"""
         try:
-            # Try loading with joblib
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                self.model = joblib.load(self.model_path)
-            logger.info("Model loaded with joblib")
-        except Exception as e1:
-            logger.warning(f"Joblib load failed: {e1}")
-            try:
-                # Fallback to pickle
-                with open(self.model_path, "rb") as f:
-                    self.model = pickle.load(f)
-                logger.info("Model loaded with pickle")
-            except Exception as e2:
-                logger.error(f"Failed to load model with both joblib and pickle: {e2}")
-                raise e2
-
-        # Test the model with a dummy prediction
-        self._test_model()
-
-    def _test_model(self):
-        try:
-            dummy_data = {
-                "Sex": "male",
-                "Age": 35,
-                "Height": 175.0,
-                "Weight": 70.0,
-                "Duration": 30.0,
-                "Heart_Rate": 120.0,
-                "Body_Temp": 39.5,
+            # Load model
+            if not self.model_path.exists():
+                raise FileNotFoundError(f"Model file not found: {self.model_path}")
+            
+            self.model = joblib.load(self.model_path)
+            logger.info(f"Model loaded successfully from {self.model_path}")
+            
+            # Load preprocessor - Note: this might be redundant since the model is a pipeline
+            if not self.preprocessor_path.exists():
+                raise FileNotFoundError(f"Preprocessor file not found: {self.preprocessor_path}")
+            
+            self.preprocessor = joblib.load(self.preprocessor_path)
+            logger.info(f"Preprocessor loaded successfully from {self.preprocessor_path}")
+            
+            # Set training statistics for feature engineering (from the notebook analysis)
+            self.training_stats = {
+                'bmi_mean': 24.5,  # Approximate from typical BMI distribution
+                'bmi_std': 4.0     # Approximate standard deviation
             }
-
-            df = pd.DataFrame([dummy_data])
-            df_clean = self.clean_data(df)
-            df_engineered = self.engineer_features(df_clean)
-            df_features = df_engineered.drop(
-                columns=[col for col in ["id", "Calories", "Calories_log", "Duration_Group"] if col in df_engineered.columns]
-            )
-
-            self.model.predict(df_features)
-            logger.info("Model test prediction successful")
+            
         except Exception as e:
-            logger.error(f"Model test failed: {e}")
-
-    def _initialize_stats(self):
-        self.train_stats = {
-            "Age": {"median": 35.0},
-            "Height": {"median": 175.0},
-            "Weight": {"median": 70.0},
-            "Duration": {"median": 20.0},
-            "Heart_Rate": {"median": 95.0},
-            "Body_Temp": {"median": 40.0},
-            "Sex": {"mode": "male"},
+            logger.error(f"Failed to load components: {e}")
+            raise
+    
+    def _validate_input(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and clean input data"""
+        # Check required fields
+        missing_fields = [field for field in self.required_features if field not in data]
+        if missing_fields:
+            raise ValueError(f"Missing required fields: {missing_fields}")
+        
+        # Create validated data dictionary
+        validated_data = {}
+        
+        # Validate Sex - match the exact format from training
+        sex = str(data['Sex']).lower().strip()
+        if sex in ['male', 'm']:
+            validated_data['Sex'] = 'Male'  # Exact case from training data
+        elif sex in ['female', 'f']:
+            validated_data['Sex'] = 'Female'  # Exact case from training data
+        else:
+            raise ValueError(f"Invalid Sex value: {data['Sex']}. Must be 'male' or 'female'")
+        
+        # Validate numeric fields with ranges
+        numeric_validations = {
+            'Age': (1, 120),
+            'Height': (50, 250),  # cm
+            'Weight': (20, 300),  # kg
+            'Duration': (1, 1440), # minutes (max 24 hours)
+            'Heart_Rate': (30, 220), # bpm
+            'Body_Temp': (30, 45)  # Celsius
         }
-
-    def clean_data(self, df):
-        df = df.copy()
-        numeric_cols = ["Age", "Height", "Weight", "Duration", "Heart_Rate", "Body_Temp"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            df[col] = df[col].fillna(self.train_stats[col]["median"])
-
-        if "Sex" in df.columns:
-            df["Sex"] = df["Sex"].fillna(self.train_stats["Sex"]["mode"])
-            df["Sex"] = df["Sex"].str.lower().replace({"m": "male", "f": "female"})
-
-        return df
-
-    def engineer_features(self, df):
-        df = df.copy()
-
-        if "Weight" in df.columns and "Height" in df.columns:
-            df["BMI"] = df["Weight"] / (df["Height"] / 100) ** 2
-
-        if "Duration" in df.columns and "Heart_Rate" in df.columns:
-            df["Activity_Intensity"] = df["Duration"] * df["Heart_Rate"]
-
-        if "Age" in df.columns and "BMI" in df.columns:
-            df["Metabolic_Age"] = df["Age"] * df["BMI"] / 10
-
-        if "Heart_Rate" in df.columns and "Duration" in df.columns and "Age" in df.columns:
-            df["Cardio_Effort"] = df["Heart_Rate"] * df["Duration"] / (df["Age"] + 1)
-
-        if "Body_Temp" in df.columns and "Heart_Rate" in df.columns:
-            df["Temp_HR_Ratio"] = df["Body_Temp"] / df["Heart_Rate"]
-
-        if "Weight" in df.columns and "Height" in df.columns:
-            df["Weight_Height_Ratio"] = df["Weight"] / (df["Height"] + 1)
-
-        if "Age" in df.columns:
-            df["Age_Group"] = pd.cut(
-                df["Age"], bins=[0, 30, 50, 100], labels=["<30", "30-50", ">50"], right=False
-            )
-
-        if "Duration" in df.columns:
-            df["Duration_Group"] = pd.cut(
-                df["Duration"], bins=[0, 10, 20, 31], labels=["Short", "Medium", "Long"], right=True
-            )
-
-        return df
-
-    def validate_input(self, data):
-        required_fields = ["Sex", "Age", "Height", "Weight", "Duration", "Heart_Rate", "Body_Temp"]
-        missing = [f for f in required_fields if f not in data]
-        if missing:
-            raise ValueError(f"Missing fields: {missing}")
-
-        validations = {
-            "Age": (1, 120, "Age must be between 1 and 120"),
-            "Height": (50, 250, "Height must be between 50 and 250 cm"),
-            "Weight": (20, 300, "Weight must be between 20 and 300 kg"),
-            "Duration": (1, 300, "Duration must be between 1 and 300 minutes"),
-            "Heart_Rate": (40, 220, "Heart rate must be between 40 and 220 bpm"),
-            "Body_Temp": (35, 45, "Body temperature must be between 35 and 45°C"),
-        }
-
-        errors = []
-        for field, (min_val, max_val, msg) in validations.items():
+        
+        for field, (min_val, max_val) in numeric_validations.items():
             try:
-                val = float(data[field])
-                if not (min_val <= val <= max_val):
-                    errors.append(msg)
-            except:
-                errors.append(f"{field} must be a number")
-
-        if data.get("Sex", "").lower() not in ["male", "female", "m", "f"]:
-            errors.append("Sex must be 'male' or 'female'")
-
-        if errors:
-            raise ValueError("; ".join(errors))
-        return True
-
-    def predict(self, input_data):
+                value = float(data[field])
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"{field} must be between {min_val} and {max_val}, got {value}")
+                validated_data[field] = value
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid {field} value: {data[field]}. Must be a number.")
+        
+        return validated_data
+    
+    def _engineer_features(self, data: Dict[str, Any]) -> pd.DataFrame:
+        """Apply feature engineering exactly as done in training"""
+        df = pd.DataFrame([data])
+        
+        # Create BMI feature (as done in the notebook)
+        df['BMI'] = df['Weight'] / (df['Height']/100)**2
+        
+        # Ensure the column order matches what the model expects
+        # From the notebook: the model expects these exact columns in this order
+        expected_columns = ['Sex', 'Age', 'Height', 'Weight', 'Duration', 'Heart_Rate', 'Body_Temp', 'BMI']
+        df = df[expected_columns]
+        
+        return df
+    
+    def predict(self, input_data: Dict[str, Any]) -> float:
+        """Make calorie prediction with proper pipeline handling"""
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
+        
         try:
-            self.validate_input(input_data)
-
-            df = pd.DataFrame([input_data]) if isinstance(input_data, dict) else input_data.copy()
-            df_clean = self.clean_data(df)
-            df_engineered = self.engineer_features(df_clean)
-            df_features = df_engineered.drop(
-                columns=[col for col in ["id", "Calories", "Calories_log", "Duration_Group"] if col in df_engineered.columns]
-            )
-
-            log_prediction = self.model.predict(df_features)
-            calories_prediction = np.expm1(log_prediction)
-
-            if len(calories_prediction) == 1:
-                return float(calories_prediction[0])
-            return calories_prediction.tolist()
-
+            # Validate input
+            validated_data = self._validate_input(input_data)
+            logger.info(f"Input validated: {validated_data}")
+            
+            # Apply feature engineering
+            df = self._engineer_features(validated_data)
+            logger.info(f"Features engineered, shape: {df.shape}, columns: {list(df.columns)}")
+            
+            # The model is a pipeline that includes preprocessing, so we just pass the raw DataFrame
+            # The model pipeline will handle all preprocessing internally
+            log_prediction = self.model.predict(df)[0]
+            logger.info(f"Log prediction: {log_prediction}")
+            
+            # Convert from log space to original space
+            prediction = np.expm1(log_prediction)
+            
+            # Ensure positive prediction
+            prediction = max(prediction, 0.01)
+            
+            logger.info(f"Final prediction: {prediction:.2f} calories")
+            return float(prediction)
+            
         except Exception as e:
-            logger.error(f"Prediction error: {e}")
+            logger.error(f"Prediction failed: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             raise
 
+# Global predictor instance
+_predictor: Optional[CaloriePredictor] = None
 
-# Singleton for Flask or similar
-predictor = None
+def get_predictor() -> CaloriePredictor:
+    """Get singleton predictor instance"""
+    global _predictor
+    if _predictor is None:
+        model_path = "models/CatBoost_model.pkl"
+        preprocessor_path = "preprocessor/Preprocessor_CatBoost.pkl"
+        _predictor = CaloriePredictor(model_path, preprocessor_path)
+    return _predictor
 
-def get_predictor():
-    global predictor
-    if predictor is None:
-        predictor = CaloriePredictor()
-    return predictor
+def reload_predictor():
+    """Reload the predictor (useful for updates)"""
+    global _predictor
+    _predictor = None
+    return get_predictor()
